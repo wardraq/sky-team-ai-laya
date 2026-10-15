@@ -22,6 +22,19 @@ const { loadGameEnvironment } = require('./src/logic/load-logic');
 const { GameLogic, ScenarioRegistry } = loadGameEnvironment(DIR);
 console.log('✓ 逻辑层加载成功（game-logic + scenario/module registry）');
 
+/* ---------- AI 陪玩 ---------- */
+const { createAIPlayer } = require('./ai/ai-player');
+const AI_ENGINE = process.env.AI_ENGINE || 'planner';   // planner | laya | auto
+const AI_FAIR = process.env.AI_FAIR === '1';            // 1 = 只让 AI 看到公共信息（默认全知，与当前规则一致）
+const AI_COOP = process.env.AI_COOP != null ? Number(process.env.AI_COOP) : 1;
+const AI_SAMPLES = process.env.AI_SAMPLES != null ? Number(process.env.AI_SAMPLES) : 1;
+const AI_DELAY = process.env.AI_DELAY != null ? Number(process.env.AI_DELAY) : 700;
+const aiPlayer = createAIPlayer(GameLogic, {
+  engine: AI_ENGINE, fair: AI_FAIR, coop: AI_COOP, samples: AI_SAMPLES
+});
+console.log('✓ AI 陪玩就绪（engine=' + AI_ENGINE +
+  (aiPlayer.layaAvailable ? '，laya 客户端已加载' : '') + '）');
+
 function defaultScenarioId() {
   return ScenarioRegistry.defaultId || 'yul';
 }
@@ -108,7 +121,10 @@ function getRoom(id) {
       passengers: new Set(),
       conns: new Map(),
       state: null,
-      scenarioId: null
+      scenarioId: null,
+      ai: { pilot: false, copilot: false },   // 该座位是否由 AI 托管
+      aiTimer: null,                          // AI 思考计时器（防重入）
+      aiBusy: false
     });
   }
   return rooms.get(id);
@@ -165,6 +181,7 @@ function sanitize(s, role) {
 
 function send(conn, obj) {
   try {
+    if (conn && conn.isAI) return;          // AI 座位没有 socket，不需要收状态
     if (conn && conn.ws) conn.ws.sendText(JSON.stringify(obj));
     else console.error('send 失败: conn 无效', conn && conn.role);
   } catch (e) { console.error('send 异常:', e.message); }
@@ -181,6 +198,7 @@ function broadcast(room, msg) {
 function broadcastState(room) {
   if (!room.state) return;
   broadcast(room, { type: 'state', state: room.state });
+  scheduleAI(room);        // 状态一变就看看 AI 要不要动
 }
 function broadcastPeers(room) {
   broadcast(room, { type: 'peers', peers: peersOf(room) });
@@ -201,13 +219,10 @@ function startIfReady(room) {
   }
 }
 
-/* ---------- 动作仲裁 ---------- */
-function handleAction(conn, msg) {
-  const room = conn.room;
-  if (!room) return;
-  const role = conn.role;
+/* ---------- 动作仲裁：玩家与 AI 共用同一条执行路径 ---------- */
+function applyAction(room, role, name, args) {
   const isPlayer = role === 'pilot' || role === 'copilot';
-  const name = msg.name, args = msg.args || [];
+  args = args || [];
 
   if (name === 'set-scenario') {
     if (isPlayer && !room.state && role === 'pilot') {
@@ -219,10 +234,10 @@ function handleAction(conn, msg) {
       });
       broadcast(room, Object.assign({ type: 'scenario' }, scenarioPayload(room)));
     }
-    return;
+    return { ok: true };
   }
 
-  if (!room.state) return;
+  if (!room.state) return { ok: false, why: '对局尚未开始' };
   GameLogic.ensureRerollPick(room.state);
   const s = room.state;
 
@@ -237,20 +252,20 @@ function handleAction(conn, msg) {
       case 'begin-reroll':
         if (isPlayer) {
           var br = GameLogic.beginReroll(s);
-          if (br && !br.ok) { send(conn, { type: 'err', msg: br.why }); return; }
+          if (br && !br.ok) return { ok: false, why: br.why };
         }
         break;
       case 'reroll-pick':
         if (isPlayer) {
           var pickArgs = Array.isArray(args[0]) && args.length === 1 ? args[0] : args;
           var rp = GameLogic.submitRerollPick(s, role, pickArgs);
-          if (rp && !rp.ok) { send(conn, { type: 'err', msg: rp.why }); return; }
+          if (rp && !rp.ok) return { ok: false, why: rp.why };
         }
         break;
       case 'reroll':
         if (isPlayer) {
           var rb = GameLogic.beginReroll(s);
-          if (rb && !rb.ok) { send(conn, { type: 'err', msg: rb.why }); return; }
+          if (rb && !rb.ok) return { ok: false, why: rb.why };
         }
         break;
       case 'done-roll':
@@ -262,10 +277,7 @@ function handleAction(conn, msg) {
             coffeePlus: args[2] || 0,
             coffeeMinus: args[3] || 0
           });
-          if (res && !res.ok) {
-            send(conn, { type: 'err', msg: res.why });
-            return;
-          }
+          if (res && !res.ok) return { ok: false, why: res.why };
         }
         break;
       case 'coffee':
@@ -286,14 +298,90 @@ function handleAction(conn, msg) {
         }
         break;
       default:
-        send(conn, { type: 'err', msg: '未知动作: ' + name });
-        return;
+        return { ok: false, why: '未知动作: ' + name };
     }
   } catch (e) {
-    send(conn, { type: 'err', msg: e.message });
+    return { ok: false, why: e.message };
+  }
+  return { ok: true };
+}
+
+function handleAction(conn, msg) {
+  const room = conn.room;
+  if (!room) return;
+  const res = applyAction(room, conn.role, msg.name, msg.args);
+  if (!res || !res.ok) {
+    send(conn, { type: 'err', msg: (res && res.why) || '动作失败' });
     return;
   }
   broadcastState(room);
+}
+
+/* ---------- AI 陪玩调度 ----------
+ * 状态每次广播后都检查一次：轮到 AI 就让它在 AI_DELAY 毫秒后走一步。
+ * 用计时器串行推进（一步一广播），避免并发写同一份 state。 */
+function aiSeats(room) {
+  var list = [];
+  if (room.ai.pilot) list.push('pilot');
+  if (room.ai.copilot) list.push('copilot');
+  return list;
+}
+
+function scheduleAI(room) {
+  if (!room.state) return;
+  if (room.aiTimer || room.aiBusy) return;
+  if (room.state.phase === 'win' || room.state.phase === 'lose') return;
+  if (!aiSeats(room).length) return;
+
+  room.aiTimer = setTimeout(function () {
+    room.aiTimer = null;
+    runAIStep(room);
+  }, AI_DELAY);
+}
+
+function runAIStep(room) {
+  var s = room.state;
+  if (!s) return;
+  if (s.phase === 'win' || s.phase === 'lose') return;
+  if (room.aiBusy) return;
+  room.aiBusy = true;
+
+  var seats = aiSeats(room);
+  var idx = 0;
+
+  function tryNext() {
+    if (idx >= seats.length) { room.aiBusy = false; broadcastState(room); return; }
+    var role = seats[idx++];
+
+    Promise.resolve(aiPlayer.decide(s, role)).then(function (act) {
+      if (!act) { tryNext(); return; }
+      var res = applyAction(room, role, act.name, act.args);
+      if (!res || !res.ok) {
+        // AI 动作被拒（例如另一座位已经先动），交给下一轮广播重试
+        console.warn('[AI] ' + role + ' ' + act.name + ' 被拒: ' + (res && res.why));
+      }
+      if (room.state !== s) { room.aiBusy = false; broadcastState(room); return; }
+      broadcast(room, { type: 'notice', msg: '🤖 ' + GameLogic.ROLES[role] + '（AI）' + describeAction(act) });
+      room.aiBusy = false;
+      broadcastState(room);
+    }).catch(function (e) {
+      console.error('[AI] 决策异常:', e && e.message);
+      room.aiBusy = false;
+    });
+  }
+
+  tryNext();
+}
+
+function describeAction(act) {
+  if (!act) return '';
+  if (act.name === 'place') return ' 落子';
+  if (act.name === 'roll') return ' 掷骰';
+  if (act.name === 'begin-roll') return ' 进入掷骰';
+  if (act.name === 'done-roll') return ' 进入放置';
+  if (act.name === 'settle') return ' 结算';
+  if (act.name === 'next-round') return ' 进入下一轮';
+  return '';
 }
 
 /* ---------- HTTP 静态服务 ---------- */
@@ -323,6 +411,35 @@ server.on('upgrade', (req, socket) => {
   }
 });
 
+/* ---------- AI 托管座位（虚拟连接，不占 WebSocket） ---------- */
+function makeAIConn(room, role) {
+  return { role: role, room: room, ws: null, isAI: true };
+}
+
+/** ?ai=1 → 对面座位交给 AI；?ai=both / ?ai=pilot / ?ai=copilot 亦可 */
+function applyAIRequest(room, myRole, aiParam) {
+  if (!aiParam) return;
+  var v = String(aiParam).toLowerCase();
+  var other = (myRole === 'pilot') ? 'copilot' : 'pilot';
+  var want = [];
+  if (v === '1' || v === 'yes' || v === 'true' || v === 'other' || v === 'single') {
+    want = (myRole === 'pilot' || myRole === 'copilot') ? [other] : ['copilot'];
+  } else if (v === 'both' || v === 'all') {
+    want = ['pilot', 'copilot'];
+  } else if (v === 'pilot' || v === 'copilot') {
+    want = [v];
+  }
+  want.forEach(function (r) {
+    if (room.ai[r]) return;
+    if (room[r] && room[r].isAI) return;
+    room.ai[r] = true;
+    room[r] = makeAIConn(room, r);
+  });
+  if (want.length) {
+    console.log('[AI] 房间 ' + room.id + ' 托管座位：' + want.join(', '));
+  }
+}
+
 function upgradeHandler(req, socket) {
   const u = new URL(req.url, 'http://localhost');
   if (u.pathname !== '/ws') { socket.destroy(); return; }
@@ -335,10 +452,15 @@ function upgradeHandler(req, socket) {
   const roomId = u.searchParams.get('room') || 'default';
   const role = ['pilot', 'copilot', 'passenger'].indexOf(u.searchParams.get('role')) !== -1 ? u.searchParams.get('role') : 'passenger';
   const scenarioParam = u.searchParams.get('scenario');
+  const aiParam = u.searchParams.get('ai');
   const room = getRoom(roomId);
 
-  // 占位：pilot/copilot 顶替旧连接
+  // AI 托管：让对面座位由 AI 坐（也可显式指定 pilot / copilot / both）
+  applyAIRequest(room, role, aiParam);
+
+  // 占位：pilot/copilot 顶替旧连接（真人优先，AI 让位）
   if (role === 'pilot' || role === 'copilot') {
+    room.ai[role] = false;
     const old = room[role];
     if (old && old.ws) { try { old.ws.close(); } catch (e) {} room.conns.delete(old); }
     room[role] = null;
@@ -379,7 +501,11 @@ function upgradeHandler(req, socket) {
       broadcast(room, { type: 'notice', msg: '⚠ ' + GameLogic.ROLES[role] + ' 已断开连接' });
     }
     broadcastPeers(room);
-    if (!room.pilot && !room.copilot && room.passengers.size === 0) rooms.delete(roomId);
+    // 房间里只剩 AI、没有真人了 → 回收，别让 AI 空转
+    if (room.conns.size === 0 && room.passengers.size === 0) {
+      if (room.aiTimer) clearTimeout(room.aiTimer);
+      rooms.delete(roomId);
+    }
   });
 
   startIfReady(room);
@@ -394,6 +520,10 @@ server.listen(PORT, () => {
   console.log('  机长:  http://localhost:' + PORT + '/?room=sky&role=pilot');
   console.log('  副驾:  http://localhost:' + PORT + '/?room=sky&role=copilot');
   console.log('  乘客:  http://localhost:' + PORT + '/?room=sky&role=passenger');
+  console.log('  ── AI 陪玩（你当机长，AI 当副驾）');
+  console.log('  机长+AI: http://localhost:' + PORT + '/?room=solo&role=pilot&ai=1');
+  console.log('  副驾+AI: http://localhost:' + PORT + '/?room=solo2&role=copilot&ai=1');
+  console.log('  观战AI对战: http://localhost:' + PORT + '/?room=bot&role=passenger&ai=both');
   console.log('  模块实验室: http://localhost:' + PORT + '/test/module-lab.html');
   console.log('  着陆轮测试: http://localhost:' + PORT + '/test/landing-round-lab.html');
   console.log('==============================================');

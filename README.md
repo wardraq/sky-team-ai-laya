@@ -48,6 +48,20 @@ nohup QUIET=1 node server.js > server.log 2>&1 &
 
 **本地双人测试**：开两个标签页，分别打开机长与副驾链接即可。
 
+**AI 陪玩**（单人也能立刻开一局）：
+
+| 入口 | URL |
+|------|-----|
+| 你当机长，AI 当副驾 | http://localhost:8088/?room=solo&role=pilot&ai=1 |
+| 你当副驾，AI 当机长 | http://localhost:8088/?room=solo2&role=copilot&ai=1 |
+| 观战：两个座位都由 AI 托管 | http://localhost:8088/?room=bot&role=passenger&ai=both |
+
+`?ai=` 还可取 `both` / `pilot` / `copilot`；**真人优先**，AI 占的座位有真人连进来时自动让位。
+
+AI 默认走零依赖的确定性规划器（约 30ms/步，自博弈胜率 45%，项目自带启发式对照组为 0%），
+也可以接 laya 决策服务（`AI_ENGINE=laya`，服务不在时自动降级）。
+完整说明、实测数据、调参项与已知限制见 **[docs/AI陪玩.md](docs/AI陪玩.md)**。
+
 > 请勿用 `file://` 直接打开 `index.html`，需通过 `server.js` 提供静态文件与 WebSocket。
 
 ---
