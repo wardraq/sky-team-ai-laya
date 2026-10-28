@@ -2,7 +2,7 @@
  * 天合小队 Sky Team —— AI 决策器回归测试 / 自博弈
  *
  * 用法：
- *   node test/test-ai.js [局数] [配置]
+ *   node test/ai/test-ai.js [局数] [配置]
  *   配置：ai-ai | ai-pilot | ai-copilot | base-base | all（默认 all）
  *
  * 说明：base 指逻辑层自带 test.js 里的启发式（逐颗贪心），
@@ -10,7 +10,7 @@
  * ============================================================ */
 'use strict';
 const path = require('path');
-const ROOT = path.join(__dirname, '..');
+const ROOT = path.join(__dirname, '../..');
 const { loadGameEnvironment } = require(path.join(ROOT, 'src/logic/load-logic'));
 const Planner = require(path.join(ROOT, 'ai/planner'));
 
@@ -136,6 +136,7 @@ function makeBasePlayer() {
 /* ---------- AI 走子 ---------- */
 function makeAIPlayer(opts) {
   return function aiMove(s) {
+    Planner.applyReroll(s, Logic);
     const role = s.currentPlayer;
     const cfg = Logic.getScenarioConfig(s);
     const mv = Planner.searchBestMove(s, role, Logic, cfg, opts);

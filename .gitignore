@@ -23,3 +23,8 @@ npm-debug.log*
 *~
 
 .ai-tracker
+
+# 微调产物（权重几百 MB，数据可再生成）
+data/laya-finetune/
+data/train-records/
+models/

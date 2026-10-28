@@ -8,8 +8,8 @@
  *
  * 用法：
  *   PORT=8099 AI_DELAY=60 node server.js      # 另开一个终端
- *   node test/test-ai-online.js                # 默认连 8099
- *   node test/test-ai-online.js 5              # 连跑 5 局
+ *   node test/ai/test-ai-online.js                # 默认连 8099
+ *   node test/ai/test-ai-online.js 5              # 连跑 5 局
  * ============================================================ */
 'use strict';
 

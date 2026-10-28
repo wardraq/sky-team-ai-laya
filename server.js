@@ -29,11 +29,23 @@ const AI_FAIR = process.env.AI_FAIR === '1';            // 1 = 只让 AI 看到�
 const AI_COOP = process.env.AI_COOP != null ? Number(process.env.AI_COOP) : 1;
 const AI_SAMPLES = process.env.AI_SAMPLES != null ? Number(process.env.AI_SAMPLES) : 1;
 const AI_DELAY = process.env.AI_DELAY != null ? Number(process.env.AI_DELAY) : 700;
+const AI_MACRO = process.env.AI_MACRO !== '0';          // 0 = 退回只看评分，不打终局
+const AI_PROB = process.env.AI_PROB !== '0';            // 0 = 姿态和引擎退回原来的评分
+// 默认旁路：先对照胜率，再把 AI_LAYA_APPLY=1 打开。打开后仍要置信度达到阈值才改落子。
+const AI_LAYA_APPLY = process.env.AI_LAYA_APPLY === '1';
+const AI_LAYA_MIN_CONF = process.env.AI_LAYA_MIN_CONF != null ? Number(process.env.AI_LAYA_MIN_CONF) : 0.6;
 const aiPlayer = createAIPlayer(GameLogic, {
-  engine: AI_ENGINE, fair: AI_FAIR, coop: AI_COOP, samples: AI_SAMPLES
+  engine: AI_ENGINE, fair: AI_FAIR, coop: AI_COOP, samples: AI_SAMPLES, macro: AI_MACRO, prob: AI_PROB,
+  layaApply: AI_LAYA_APPLY, layaMinConf: AI_LAYA_MIN_CONF
 });
 console.log('✓ AI 陪玩就绪（engine=' + AI_ENGINE +
-  (aiPlayer.layaAvailable ? '，laya 客户端已加载' : '') + '）');
+  (aiPlayer.macro ? '，要事终局选择开' : '') +
+  (aiPlayer.prob ? '，姿态引擎概率开' : '') +
+  (aiPlayer.layaAvailable ? '，laya 客户端已加载' : '') +
+  ((AI_ENGINE === 'laya' || AI_ENGINE === 'auto')
+    ? (AI_LAYA_APPLY ? '，laya 要事接管 conf>=' + AI_LAYA_MIN_CONF : '，laya 旁路记录')
+    : '') +
+  '）');
 
 function defaultScenarioId() {
   return ScenarioRegistry.defaultId || 'yul';
@@ -375,6 +387,8 @@ function runAIStep(room) {
 
 function describeAction(act) {
   if (!act) return '';
+  if (act.name === 'begin-reroll') return ' 使用重掷';
+  if (act.name === 'reroll-pick') return ' 确认重掷';
   if (act.name === 'place') return ' 落子';
   if (act.name === 'roll') return ' 掷骰';
   if (act.name === 'begin-roll') return ' 进入掷骰';

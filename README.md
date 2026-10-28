@@ -60,7 +60,7 @@ nohup QUIET=1 node server.js > server.log 2>&1 &
 
 AI 默认走零依赖的确定性规划器（约 30ms/步，自博弈胜率 45%，项目自带启发式对照组为 0%），
 也可以接 laya 决策服务（`AI_ENGINE=laya`，服务不在时自动降级）。
-完整说明、实测数据、调参项与已知限制见 **[docs/AI陪玩.md](docs/AI陪玩.md)**。
+完整说明、实测数据、调参项与已知限制见 **[docs/ai/AI陪玩.md](docs/ai/AI陪玩.md)**。
 
 > 请勿用 `file://` 直接打开 `index.html`，需通过 `server.js` 提供静态文件与 WebSocket。
 
@@ -142,12 +142,19 @@ sky-team/
 ├── guide-preview.html      # 指导页内嵌 UI 预览（只读，与正式对局一致）
 ├── guide-game.css          # 指导页 / 预览共用样式
 ├── server.js               # HTTP 静态服务 + WebSocket 房间 + 规则仲裁
-├── docs/                   # 规则与设计文档
+├── docs/                   # 规则、设计与 AI 文档
 │   ├── SkyTeam.zh.md       # 中文规则书（按官方 PDF 全译）
 │   ├── SkyTeam.raw.md      # 页图 OCR 原文 + 补充说明
 │   ├── SkyTeam.en.md       # 英文规则整理
 │   ├── DESIGN.md           # 架构、结算顺序、与原版差异
-│   └── pdf-pages/          # 官方规则书页图（page-01 … page-20）
+│   ├── pdf-pages/          # 官方规则书页图（page-01 … page-20）
+│   └── ai/                 # AI 陪玩、架构、laya 微调与评估
+│       ├── AI陪玩.md
+│       ├── AI陪玩架构.md
+│       ├── laya模型学习.md
+│       ├── laya微调.md
+│       ├── laya提示词样本.md
+│       └── laya效果评估.md
 ├── test/
 │   ├── test.js             # 逻辑层蒙特卡洛冒烟
 │   ├── test-modules.js     # 玩法模块与规则单元测试

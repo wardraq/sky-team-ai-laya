@@ -2,8 +2,8 @@
  * 天合小队 Sky Team —— 把局面渲染成 laya 能读的文字
  *
  * laya 是「给若干选项、选一个」的决策引擎，不是生成模型。
- * 所以这里的职责就是把「这盘棋现在什么样」和「有哪几个落子可选」
- * 翻译成一段简短的自然语言 + 一组带描述的选项。
+ * 这里把公开局面和「此刻成立的几件要事」写成它能选的选项。
+ * 选项里不写规划器分数，也不写对手还没放的骰子。
  *
  * 注意 token 预算：laya 的「指令 + 全部选项」共享 head_max_len
  * （英文 192 / 多语 256）。选项越多每个分到的预算越少，
@@ -19,12 +19,14 @@ var SLOT_LABEL = {
   coffee1: '集中精力', coffee2: '集中精力', coffee3: '集中精力'
 };
 
-var INSTRUCTIONS =
-  '你是 Sky Team 里的副驾驶。机长和副驾合作，要在 7 轮内把客机安全降落到蒙特利尔：' +
-  '让高度和距离同时归零，清空跑道上的飞机，激活全部起落架与襟翼，' +
-  '并在着陆轮把双方引擎点数之和压到刹车值以下。' +
-  '姿态靠双方点数之差调整：机长点数减副驾点数应等于当前姿态值，才能保持水平。' +
-  '请只选一个对本次降落最有利的落子。';
+var Planner = require('./planner');
+
+/** 按当前角色和关卡轮数生成指令，不写死副驾驶或 7 轮 */
+function instructionsFor(role, rounds) {
+  var name = role === 'pilot' ? '机长' : '副驾';
+  return '你是' + name + '。机长和副驾合作，要在 ' + rounds +
+    ' 轮内把客机安全降落。下面几件事现在都做得成。请只选一件最该先做的。';
+}
 
 /**
  * 把当前局面写成一段话给 laya 看。
@@ -73,10 +75,20 @@ function describeMove(s, role, Logic, m) {
   return name + ' 把 ' + raw + ' 用咖啡改到 ' + m.val;
 }
 
-/**
- * 从排序好的候选里取前 K 个，转成 laya 的选项。
- * 只保留「描述不同」的候选，避免一堆同义选项互相挤压 token 预算。
- */
+/** 把当前成立的要事写成选项。文案里只有这件事为何成立，不写规划器分数。 */
+function renderPriorities(s, role, Logic, cfg, ids) {
+  var out = [];
+  for (var i = 0; i < ids.length; i++) {
+    var id = ids[i];
+    out.push({
+      key: String.fromCharCode(97 + out.length),
+      id: id,
+      text: (Planner.PRIORITY_LABEL[id] || id) + '：' + Planner.priorityDetail(s, role, Logic, cfg, id)
+    });
+  }
+  return out;
+}
+
 function renderOptions(s, role, Logic, ranked, maxK) {
   var out = [], seen = {};
   for (var i = 0; i < ranked.length && out.length < maxK; i++) {
@@ -90,9 +102,10 @@ function renderOptions(s, role, Logic, ranked, maxK) {
 }
 
 module.exports = {
-  INSTRUCTIONS: INSTRUCTIONS,
+  instructionsFor: instructionsFor,
   SLOT_LABEL: SLOT_LABEL,
   describeState: describeState,
   describeMove: describeMove,
+  renderPriorities: renderPriorities,
   renderOptions: renderOptions
 };

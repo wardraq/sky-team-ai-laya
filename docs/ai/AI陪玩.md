@@ -10,7 +10,7 @@ ai/                     AI 决策层（Node，零依赖）
   laya-prompt.js        把局面和候选渲染成 laya 能读的文字
   laya-client.js        Node → laya 服务的 HTTP 客户端（带熔断降级）
   laya_service.py       laya 常驻服务（Python，模型只加载一次）
-test/
+test/ai/
   test-ai.js            AI 自博弈回归（胜率 / 输因分布 / 耗时）
   test-ai-online.js     联机冒烟测试（AI 托管双方，验证整局不卡死）
 ```
@@ -36,7 +36,7 @@ AI 每步会停 `AI_DELAY` 毫秒再落子，模拟"队友在思考"，并广播
 
 ## 2. 实测数据
 
-每档 200 局自博弈，关卡 `yul`，`node test/test-ai.js 200`：
+每档 200 局自博弈，关卡 `yul`，`node test/ai/test-ai.js 200`：
 
 | 配置 | 胜率 | 说明 |
 |---|---|---|
@@ -119,7 +119,7 @@ AI 放 2、对手放 3，轴直接偏 1；几轮下来累积到 ±3 就尾旋了
 **对手手里的骰子是有值的**。AI 的默认设置与这个规则一致（`AI_FAIR=0`），所以它**不算作弊**。
 
 但如果你把规则改成"只公开已放置的骰子"（官方桌游用屏风的做法），必须设 `AI_FAIR=1`。
-代价很直接：**胜率从 45% 掉到 0.5%**（`node test/test-ai.js 200 ai-ai-fair`）。
+代价很直接：**胜率从 45% 掉到 0.5%**（`node test/ai/test-ai.js 200 ai-ai-fair`）。
 原因是 §4③ 里那个协作点 —— 看不到对手的手牌，AI 就无法保证姿态能配平，而姿态失衡
 一次就是 3 格累积、直接尾旋。
 
@@ -195,13 +195,13 @@ node -e "require('./ai/laya-client').health().then(console.log)"
 ## 7. 回归测试
 
 ```bash
-node test/test-ai.js 200                # 全部对照（约 15 秒）
-node test/test-ai.js 200 ai-ai          # 只跑默认设置
+node test/ai/test-ai.js 200                # 全部对照（约 15 秒）
+node test/ai/test-ai.js 200 ai-ai          # 只跑默认设置
 node test/test.js 300                   # 逻辑层冒烟 + 基线对照
 
 # 联机链路（另开终端先起服务）
 PORT=8099 AI_DELAY=60 node server.js
-node test/test-ai-online.js 6
+node test/ai/test-ai-online.js 6
 ```
 
 `test-ai.js` 输出的输因分布是调参时最有用的东西：哪一类死因突然涨了就说明改坏了。

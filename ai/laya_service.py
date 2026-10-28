@@ -38,6 +38,8 @@ MAX_OPTIONS = int(os.environ.get("LAYA_MAX_OPTIONS", "8"))
 # 默认 preload=True 会把所有 checkpoint 都拉下来（多语 322M + 英文 421M + typed）。
 # 这个游戏全程中文，只留多语版就够，能少下 800MB 左右。
 LAYA_PRELOAD = os.environ.get("LAYA_PRELOAD", "")
+# 指向 laya-train 产出的目录时，不再走官方 Router，直接加载这份权重。
+LAYA_CHECKPOINT = os.environ.get("LAYA_CHECKPOINT", "")
 
 _router = None
 _lock = threading.Lock()          # laya 单例不是线程安全的，串行化
@@ -46,16 +48,21 @@ _lock = threading.Lock()          # laya 单例不是线程安全的，串行化
 def get_router():
     global _router
     if _router is None:
-        from laya import Router
         t0 = time.time()
-        names = [n.strip() for n in LAYA_PRELOAD.split(",") if n.strip()]
-        if names:
-            _router = Router(preload=False)
-            _router.preload(names)
+        if LAYA_CHECKPOINT:
+            from laya import load
+            _router = load(LAYA_CHECKPOINT)
+            print("[laya] 微调权重就绪：%s，用时 %.1fs" % (LAYA_CHECKPOINT, time.time() - t0), flush=True)
         else:
-            # preload 是必须的：否则每次语种切换都会重建模型（7~10s）
-            _router = Router(preload=True)
-        print("[laya] 模型就绪（%s），用时 %.1fs" % (",".join(names) or "全部", time.time() - t0), flush=True)
+            from laya import Router
+            names = [n.strip() for n in LAYA_PRELOAD.split(",") if n.strip()]
+            if names:
+                _router = Router(preload=False)
+                _router.preload(names)
+            else:
+                # preload 是必须的：否则每次语种切换都会重建模型（7~10s）
+                _router = Router(preload=True)
+            print("[laya] 模型就绪（%s），用时 %.1fs" % (",".join(names) or "全部", time.time() - t0), flush=True)
     return _router
 
 
@@ -88,7 +95,7 @@ def run_decide(payload):
         "choice": ans.get("choice"),
         "confidence": ans.get("confidence"),
         "probs": ans.get("probs") or ans.get("probabilities") or {},
-        "model": routing.get("model") or routing.get("lang"),
+        "model": routing.get("model") or routing.get("lang") or res.get("model") or LAYA_CHECKPOINT,
     }
 
 
@@ -106,7 +113,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/health"):
             self._json(200, {"ok": _router is not None, "port": LAYA_PORT,
-                             "maxOptions": MAX_OPTIONS})
+                             "maxOptions": MAX_OPTIONS,
+                             "checkpoint": LAYA_CHECKPOINT or None})
         else:
             self._json(404, {"error": "not found"})
 

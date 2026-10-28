@@ -2,15 +2,11 @@
  * 天合小队 Sky Team —— laya 客户端（Node 侧，零依赖）
  *
  * 分工：
- *   planner.rankMoves()  负责「算」—— 枚举 + 前瞻，给出 Top-K 候选
- *   laya                 负责「挑」—— 在候选里选一个它认为最好的
+ *   planner  负责「算」—— 枚举、前瞻、给落子标上它实现的要事
+ *   laya     负责「选要事」—— 只在两件以上同时成立时挑一件
  *
- * 为什么不是让 laya 直接算棋：
- *   laya 是 421M 的判定引擎，没有搜索能力。实测确认「laya 能替代评分，
- *   不能替代搜索」。所以位置是「候选排序器」，输入严格控制在 6~8 个选项。
- *
- * 失败一律返回 null，交给上层降级到确定性规划器 —— AI 不会因为
- * laya 没起来就停摆。
+ * 落子仍由规划器在选中的要事里取最高分。要事不足两件、服务不可用、
+ * 或调用方还在旁路阶段时，不改规划器的落子。
  * ============================================================ */
 'use strict';
 
@@ -21,7 +17,6 @@ var Prompt = require('./laya-prompt');
 var HOST = process.env.LAYA_HOST || '127.0.0.1';
 var PORT = +(process.env.LAYA_PORT || 7788);
 var TIMEOUT = +(process.env.LAYA_TIMEOUT || 8000);
-var DEFAULT_K = +(process.env.LAYA_MAX_OPTIONS || 6);
 var COOLDOWN = +(process.env.LAYA_COOLDOWN || 30000);
 
 // 服务没起来时不要每一步都空跑一次 HTTP：连续失败后熔断一段时间
@@ -65,51 +60,97 @@ function health() {
 }
 
 /**
- * 让 laya 在 Top-K 候选里挑一个。
- * @returns {Promise<{dieIdx,slot,cp,cm}|null>} null → 上层走确定性规划器
+ * 把「语义上成立的要事」收敛成「真的构成选择题的要事」。
+ *
+ * activePriorities 是按标签计数的，于是会出现两件要事其实指向同一批落子
+ * （match_axis 与 fill_mandatory 常常重合），或者某件要事背后只有一两个落子
+ * —— 那时无论选哪件，规划器都只能走出同一个动作，等于问了道没有答案的题。
+ *
+ * 实测：修饰前 120 个「被问到」的局面里，80% 属于这类假题。
+ * 剔除它们符合既有原则 —— 没有真实不确定性时，不要调用判定引擎。
  */
-function decide(Logic, s, role, opts) {
+function usablePriorities(ranked, active) {
+  var map = {}, i, j, k;
+  for (i = 0; i < active.length; i++) map[active[i]] = [];
+  for (j = 0; j < ranked.length; j++) {
+    var ps = ranked[j].priorities || [];
+    for (k = 0; k < ps.length; k++) {
+      if (map[ps[k]]) map[ps[k]].push(j);
+    }
+  }
+  var seen = {}, out = [];
+  for (i = 0; i < active.length; i++) {
+    var id = active[i], keys = map[id];
+    if (keys.length < 2) continue;      // 背后不足两个落子 → 选谁都一样
+    var sig = keys.join(',');
+    if (seen[sig]) continue;            // 与前面的要事是同一批落子 → 重复出题
+    seen[sig] = 1;
+    out.push(id);
+  }
+  return out;
+}
+
+/**
+ * 让 laya 在当前成立的要事里挑一件。
+ * 不足两件、或服务在熔断中：不发请求，choice 为 null。
+ * @returns {Promise<{ranked,active,own,asked,choice,confidence}|null>}
+ */
+function choosePriority(Logic, s, role, opts) {
   opts = opts || {};
   if (!s || s.phase !== 'place' || s.currentPlayer !== role) return Promise.resolve(null);
-  if (tripped()) return Promise.resolve(null);
 
   var cfg = Logic.getScenarioConfig(s);
   var ranked = Planner.rankMoves(s, role, Logic, cfg, opts);
-  if (ranked.length <= 1) return Promise.resolve(ranked.length ? ranked[0].move : null);
+  var activeAll = Planner.activePriorities(ranked);
+  var active = opts.rawQuestions ? activeAll : usablePriorities(ranked, activeAll);
+  var info = {
+    ranked: ranked,
+    active: active,
+    activeAll: activeAll,
+    own: null,
+    asked: false,
+    choice: null,
+    confidence: 0
+  };
+  info.own = Planner.ownPriority(ranked, Planner.bestMove(ranked, null, opts));
+  if (active.length < 2 || tripped()) return Promise.resolve(info);
 
-  // 候选本身也要过滤：完全等价的走法只留一个分数最高的
-  var minGap = (opts.minGap != null) ? opts.minGap : 0;
-  if (minGap > 0) {
-    ranked = ranked.filter(function (r) { return ranked[0].score - r.score <= minGap; });
-  }
-
-  var options = Prompt.renderOptions(s, role, Logic, ranked, (opts.maxOptions || DEFAULT_K));
-  if (options.length <= 1) return Promise.resolve(options.length ? options[0].move : null);
+  var options = Prompt.renderPriorities(s, role, Logic, cfg, active);
+  if (options.length < 2) return Promise.resolve(info);
 
   var payload = {
     state: Prompt.describeState(s, role, Logic),
-    instructions: Prompt.INSTRUCTIONS,
+    instructions: Prompt.instructionsFor(role, cfg.ROUNDS),
     options: options.map(function (o) { return { key: o.key, text: o.text }; })
   };
 
   return post('/decide', payload).then(function (res) {
-    if (!res || res.error || !res.choice) return null;
+    info.asked = true;
+    if (!res || res.error || !res.choice) return info;
     var hit = null;
     for (var i = 0; i < options.length; i++) {
       if (options[i].key === res.choice) { hit = options[i]; break; }
     }
-    if (!hit) return null;
+    if (!hit) return info;
+    info.choice = hit.id;
+    info.confidence = (typeof res.confidence === 'number') ? res.confidence : 0;
     if (opts.verbose) {
-      console.log('[laya] 选 ' + res.choice + ' (' + hit.text + ')  conf=' +
-        res.confidence + '  model=' + res.model + '  ' + res.ms + 'ms');
+      console.log('[laya] 要事 ' + info.choice + '  conf=' + info.confidence +
+        '  model=' + res.model + '  ' + res.ms + 'ms');
     }
-    return hit.move;
+    return info;
   }).catch(function (e) {
-    // 服务不可用 → 熔断，这局之后的每一步都直接走确定性规划器
     trip();
+    info.asked = true;
     if (opts.verbose) console.warn('[laya] 不可用，已降级：' + (e && e.message));
-    return null;
+    return info;
   });
 }
 
-module.exports = { decide: decide, health: health, HOST: HOST, PORT: PORT };
+module.exports = {
+  choosePriority: choosePriority,
+  usablePriorities: usablePriorities,
+  health: health,
+  HOST: HOST,
+  PORT: PORT
+};
